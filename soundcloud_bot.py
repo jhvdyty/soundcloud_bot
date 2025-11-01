@@ -10,13 +10,26 @@ from pathlib import Path
 from typing import List, Dict, Set
 import logging
 
-# Установить: pip install soundcloud-v2
+# Установить: pip install soundcloud-v2 selenium
 try:
     from soundcloud import SoundCloud
 except ImportError:
     print("Ошибка: библиотека soundcloud-v2 не установлена")
     print("Установите её командой: pip install soundcloud-v2")
     exit(1)
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException
+    from selenium.webdriver.chrome.options import Options
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+    print("⚠ Selenium не установлен. Для реальных лайков установите: pip install selenium")
+    print("  Пока будет работать только режим dry_run")
 
 # Настройка логирования
 logging.basicConfig(
@@ -55,6 +68,10 @@ class SoundCloudAutoLiker:
         self.processed_tracks_file = 'processed_tracks.json'
         self.processed_tracks = self.load_processed_tracks()
         
+        # Selenium драйвер (инициализируется при первом использовании)
+        self.driver = None
+        self.selenium_logged_in = False
+        
         logging.info("SoundCloud Auto-Liker инициализирован")
     
     def load_config(self) -> Dict:
@@ -70,6 +87,15 @@ class SoundCloudAutoLiker:
             'check_interval_minutes': 60,
             'hours_lookback': 72,  # Увеличено до 3 дней для первого запуска
             'dry_run': True,
+            
+            # Настройки Selenium
+            'selenium': {
+                'headless': False,  # True = браузер скрыт, False = видимый
+                'login_email': '',  # Email для входа в SoundCloud
+                'login_password': '',  # Пароль (будет храниться в plaintext!)
+                'wait_timeout': 10,  # Таймаут ожидания элементов (секунды)
+                'delay_between_likes': 2  # Задержка между лайками (секунды)
+            },
             
             'features': {
                 'auto_like_new_tracks': True,
@@ -641,6 +667,188 @@ class SoundCloudAutoLiker:
         
         return True
     
+    def init_selenium_driver(self):
+        """Инициализация Selenium WebDriver"""
+        if not SELENIUM_AVAILABLE:
+            logging.error("Selenium не установлен. Установите: pip install selenium")
+            return False
+        
+        if self.driver:
+            return True
+        
+        try:
+            chrome_options = Options()
+            
+            # Headless режим
+            if self.config['selenium']['headless']:
+                chrome_options.add_argument('--headless')
+                chrome_options.add_argument('--disable-gpu')
+            
+            # Дополнительные опции для стабильности
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--window-size=1920,1080')
+            
+            # User agent
+            chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            
+            self.driver = webdriver.Chrome(options=chrome_options)
+            logging.info("✓ Selenium WebDriver инициализирован")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Ошибка инициализации WebDriver: {e}")
+            logging.error("Убедитесь что ChromeDriver установлен: https://chromedriver.chromium.org/")
+            return False
+    
+    def selenium_login(self):
+        """Вход в SoundCloud через Selenium"""
+        if self.selenium_logged_in:
+            return True
+        
+        if not self.driver:
+            if not self.init_selenium_driver():
+                return False
+        
+        email = self.config['selenium'].get('login_email', '')
+        password = self.config['selenium'].get('login_password', '')
+        
+        if not email or not password:
+            logging.error("Не указаны login_email или login_password в config.json")
+            logging.error("Добавьте в секцию 'selenium' ваши данные для входа")
+            return False
+        
+        try:
+            logging.info("Выполняется вход в SoundCloud...")
+            
+            # Переходим на страницу входа
+            self.driver.get('https://soundcloud.com/signin')
+            time.sleep(2)
+            
+            wait = WebDriverWait(self.driver, self.config['selenium']['wait_timeout'])
+            
+            # Ищем поле email
+            try:
+                email_input = wait.until(
+                    EC.presence_of_element_located((By.ID, 'sign_in_up_email'))
+                )
+                email_input.clear()
+                email_input.send_keys(email)
+                time.sleep(0.5)
+                
+                # Кнопка Continue
+                continue_btn = self.driver.find_element(By.ID, 'sign_in_up_submit')
+                continue_btn.click()
+                time.sleep(2)
+                
+                # Ищем поле пароля
+                password_input = wait.until(
+                    EC.presence_of_element_located((By.ID, 'sign_in_up_password'))
+                )
+                password_input.clear()
+                password_input.send_keys(password)
+                time.sleep(0.5)
+                
+                # Кнопка Sign in
+                signin_btn = self.driver.find_element(By.ID, 'sign_in_up_submit')
+                signin_btn.click()
+                time.sleep(3)
+                
+                # Проверяем что вошли (ищем элемент профиля)
+                try:
+                    wait.until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, '[class*="header__userNav"]'))
+                    )
+                    logging.info("✓ Успешный вход в SoundCloud")
+                    self.selenium_logged_in = True
+                    return True
+                except TimeoutException:
+                    logging.error("Не удалось войти - проверьте логин/пароль")
+                    return False
+                    
+            except NoSuchElementException as e:
+                logging.error(f"Не найден элемент формы входа: {e}")
+                logging.error("Возможно, SoundCloud изменил структуру страницы")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Ошибка при входе: {e}")
+            return False
+    
+    def selenium_like_track(self, track_url: str) -> bool:
+        """
+        Лайкнуть трек через Selenium
+        
+        Args:
+            track_url: URL трека
+            
+        Returns:
+            True если успешно
+        """
+        if not self.selenium_login():
+            return False
+        
+        try:
+            # Переходим на страницу трека
+            self.driver.get(track_url)
+            time.sleep(1)
+            
+            wait = WebDriverWait(self.driver, self.config['selenium']['wait_timeout'])
+            
+            # Ищем кнопку лайка
+            # SoundCloud использует разные селекторы, пробуем несколько вариантов
+            like_button_selectors = [
+                'button[title="Like"]',
+                'button[aria-label="Like"]',
+                'button.sc-button-like',
+                '[class*="soundTitle__likeButton"]',
+                '[class*="playButton__like"]'
+            ]
+            
+            like_button = None
+            for selector in like_button_selectors:
+                try:
+                    like_button = wait.until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                    )
+                    break
+                except TimeoutException:
+                    continue
+            
+            if not like_button:
+                logging.warning(f"Не найдена кнопка лайка на странице {track_url}")
+                return False
+            
+            # Проверяем не лайкнут ли уже трек
+            button_classes = like_button.get_attribute('class') or ''
+            button_aria = like_button.get_attribute('aria-label') or ''
+            
+            if 'selected' in button_classes.lower() or 'unlike' in button_aria.lower():
+                logging.info("Трек уже лайкнут, пропускаем")
+                return True
+            
+            # Кликаем на кнопку лайка
+            like_button.click()
+            time.sleep(0.5)
+            
+            logging.info("✓ Трек успешно лайкнут через Selenium")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Ошибка при лайке через Selenium: {e}")
+            return False
+    
+    def close_selenium(self):
+        """Закрыть браузер Selenium"""
+        if self.driver:
+            try:
+                self.driver.quit()
+                logging.info("Selenium WebDriver закрыт")
+            except:
+                pass
+            self.driver = None
+            self.selenium_logged_in = False
+    
     def like_track(self, track: Dict) -> bool:
         """
         Лайкнуть трек
@@ -663,22 +871,24 @@ class SoundCloudAutoLiker:
             logging.info(f"           URL: {permalink_url}")
             return True
         
-        # Попытка реального лайка
+        # Реальный лайк через Selenium
+        if not SELENIUM_AVAILABLE:
+            logging.error("Selenium не установлен. Установите: pip install selenium")
+            logging.error("Или включите dry_run: true в config.json")
+            return False
+        
         try:
-            track_id = track.get('id')
-            if not track_id:
-                logging.error("Не удалось получить ID трека")
-                return False
+            success = self.selenium_like_track(permalink_url)
             
-            # Для реального лайка нужен auth_token и метод API
-            if not self.config.get('auth_token'):
-                logging.error("Для реальных лайков нужен auth_token в config.json")
-                return False
+            if success:
+                logging.info(f"✓ Лайкнули: {artist_name} - {track_title}")
+                logging.info(f"  URL: {permalink_url}")
+                
+                # Задержка между лайками
+                delay = self.config['selenium'].get('delay_between_likes', 2)
+                time.sleep(delay)
             
-            # Метод лайка (может отличаться в зависимости от версии библиотеки)
-            self.client.like_track(track_id)
-            logging.info(f"✓ Лайкнули: {artist_name} - {track_title}")
-            return True
+            return success
             
         except Exception as e:
             logging.error(f"Ошибка при лайке трека: {e}")
@@ -771,8 +981,10 @@ class SoundCloudAutoLiker:
                 
         except KeyboardInterrupt:
             logging.info("\nБот остановлен пользователем")
+            self.close_selenium()
         except Exception as e:
             logging.error(f"Критическая ошибка: {e}")
+            self.close_selenium()
             raise
 
 
@@ -789,13 +1001,15 @@ def main():
     print("2. Постоянная работа (цикл)")
     print("3. Тест: показать подписки")
     print("4. Тест: показать репосты пользователя")
-    print("5. Выход")
+    print("5. Тест: проверка входа через Selenium")
+    print("6. Выход")
     
-    choice = input("\nВведите номер (1-5): ").strip()
+    choice = input("\nВведите номер (1-6): ").strip()
     
     if choice == '1':
         print("\nЗапуск разовой проверки...\n")
         bot.run_once()
+        bot.close_selenium()
         print("\nГотово!")
     elif choice == '2':
         print("\nЗапуск в режиме постоянной работы...")
@@ -813,6 +1027,14 @@ def main():
             print("\nГотово!")
         else:
             print("Username не указан")
+    elif choice == '5':
+        print("\nТестирование входа через Selenium...\n")
+        if bot.selenium_login():
+            print("\n✓ Вход успешен!")
+            print("Браузер останется открытым для проверки.")
+            input("Нажмите Enter чтобы закрыть браузер...")
+        bot.close_selenium()
+        print("\nГотово!")
     else:
         print("Выход...")
 
