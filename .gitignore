@@ -1,3 +1,5 @@
 config.json
 processed_tracks.json
 soundcloud_bot.log
+*.json
+*.log
