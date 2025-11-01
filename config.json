@@ -1,0 +1,30 @@
+{
+    "auth_token": "",
+    "your_username": "sdfadsrhae",
+    "repost_artists": [
+        "jollyytg",
+        "cowboyclicker",
+        "newlightchildsss",
+        "kendrick-lamar-music",
+        "madk1d9",
+        "huzzybuzzy",
+        "et3rnity_xo",
+        "fakemink"
+
+    ],
+    "check_interval_minutes": 600,
+    "hours_lookback": 72,
+    "dry_run": true,
+    "features": {
+        "auto_like_new_tracks": true,
+        "auto_like_reposts": true,
+        "auto_like_recommendations": false,
+        "use_ml_filter": false
+    },
+    "filters": {
+        "min_duration_seconds": 0,
+        "max_duration_seconds": 0,
+        "genres": [],
+        "min_likes": 0
+    }
+}
